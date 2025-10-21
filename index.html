@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Iron Holo: Pinch-Controlled 3D Cube</title>
+
+  <!-- MediaPipe Hands -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <!-- Three.js -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #000; overflow: hidden; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+
+    .container { position: relative; width: 100vw; height: 100vh; }
+
+    video#videoElement {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%; object-fit: cover;
+      transform: scaleX(-1); /* mirror camera */
+      filter: contrast(1.05) saturate(1.15) brightness(0.95);
+    }
+
+    canvas#skelCanvas, canvas.webgl {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+    }
+
+    /* Neon hologram vibes */
+    .holo-overlay {
+      position: absolute; inset: 0; pointer-events: none;
+      background:
+        radial-gradient(1200px 800px at 70% 30%, rgba(0,255,255,0.08), transparent 60%),
+        radial-gradient(1000px 700px at 30% 70%, rgba(0, 180, 255, 0.07), transparent 60%);
+      mix-blend-mode: screen;
+    }
+
+    /* HUD */
+    .hud {
+      position: absolute; top: 16px; left: 16px; z-index: 50;
+      background: rgba(0, 10, 20, 0.55);
+      border: 1px solid rgba(0,255,255,0.25);
+      padding: 12px 14px; border-radius: 12px; color: #d8ffff;
+      backdrop-filter: blur(6px);
+      text-shadow: 0 0 6px rgba(0,255,255,0.6);
+      font-size: 14px; line-height: 1.4;
+      box-shadow: 0 0 24px rgba(0,255,255,0.12) inset, 0 0 20px rgba(0,255,255,0.15);
+    }
+    .hud .title { font-weight: 700; color: #63ffff; margin-bottom: 6px; }
+    .hud .row { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+    .hud .pill {
+      padding: 4px 8px; border-radius: 8px; font-size: 12px;
+      border: 1px solid rgba(0,255,255,0.25); color: #bff;
+      background: rgba(0, 40, 60, 0.35); text-shadow: none;
+    }
+
+    /* Start overlay */
+    .start {
+      position: absolute; inset: 0; display: grid; place-items: center; z-index: 100;
+      background: radial-gradient(1200px 800px at 50% 50%, rgba(0,255,255,0.06), rgba(0,0,0,0.96));
+      color: #d8ffff; text-align: center; padding: 20px;
+    }
+    .start .panel {
+      max-width: 720px; width: calc(100% - 40px);
+      background: rgba(0, 10, 20, 0.7);
+      border: 1px solid rgba(0,255,255,0.25); border-radius: 16px;
+      padding: 24px; backdrop-filter: blur(8px);
+      box-shadow: 0 0 32px rgba(0,255,255,0.2), inset 0 0 18px rgba(0,255,255,0.15);
+    }
+    .start h1 { font-weight: 800; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .start p  { opacity: 0.85; }
+    .start .gestures { margin: 16px 0 8px; text-align: left; }
+    .start .gestures li { margin: 8px 0; }
+    button.start-btn {
+      margin-top: 16px; padding: 12px 18px; border-radius: 10px; border: 1px solid rgba(0,255,255,0.4);
+      color: #031f24; background: linear-gradient(90deg, #10f0ff, #31ffa5);
+      cursor: pointer; font-weight: 700;
+      box-shadow: 0 6px 24px rgba(0,255,255,0.2);
+    }
+    button.start-btn:hover { filter: brightness(1.05); }
+
+    .indicator {
+      position: absolute; bottom: 16px; left: 16px; z-index: 50;
+      padding: 10px 12px; border-radius: 10px;
+      color: #d8ffff; background: rgba(0, 10, 20, 0.55);
+      border: 1px solid rgba(0,255,255,0.25);
+      text-shadow: 0 0 6px rgba(0,255,255,0.6);
+    }
+
+    /* Optional: glow on the WebGL canvas (mild) */
+    canvas.webgl {
+      filter: drop-shadow(0 0 6px #00f3ff) drop-shadow(0 0 14px rgba(0,255,255,0.5));
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <video id="videoElement" autoplay muted playsinline></video>
+    <canvas id="skelCanvas"></canvas>
+    <div class="holo-overlay"></div>
+
+    <!-- HUD -->
+    <div class="hud" id="hud">
+      <div class="title">IRON HOLO • Hand Controls</div>
+      <div>Mode: <span class="pill" id="modePill">Move</span></div>
+      <div class="row">
+        <span class="pill" id="leftPinch">Left: —</span>
+        <span class="pill" id="rightPinch">Right: —</span>
+        <span class="pill" id="scalePill">Scale: 1.00x</span>
+      </div>
+    </div>
+
+    <div class="indicator" id="indicator">👋 Pinch to grab. ✌️ to toggle rotate mode. Pinch both hands to scale.</div>
+
+    <!-- Start overlay -->
+    <div class="start" id="start">
+      <div class="panel">
+        <h1>🔷 Iron Hologram Lab</h1>
+        <p>Pinch gestures + neon 3D cube. Works best with good lighting and a clear background.</p>
+        <ul class="gestures">
+          <li>👉 One-hand pinch: grab and move the cube</li>
+          <li>🌀 Twist while pinched: rotate around Z</li>
+          <li>✌️ Peace sign: toggle Rotate mode (then pinch + drag to orbit X/Y)</li>
+          <li>👐 Two-hand pinches: scale up/down</li>
+        </ul>
+        <button class="start-btn" id="startBtn">Start</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    class IronHolo {
+      constructor() {
+        // DOM
+        this.video = document.getElementById('videoElement');
+        this.skelCanvas = document.getElementById('skelCanvas');
+        this.skelCtx = this.skelCanvas.getContext('2d');
+        this.hud = {
+          modePill: document.getElementById('modePill'),
+          leftPinch: document.getElementById('leftPinch'),
+          rightPinch: document.getElementById('rightPinch'),
+          scalePill: document.getElementById('scalePill'),
+          indicator: document.getElementById('indicator'),
+        };
+        this.startOverlay = document.getElementById('start');
+        document.getElementById('startBtn').addEventListener('click', () => {
+          this.startOverlay.style.display = 'none';
+          this.init();
+        });
+
+        // State
+        this.mode = 'move'; // 'move' | 'rotate'
+        this.width = window.innerWidth;
+        this.height = window.innerHeight;
+
+        this.showSkeleton = true;
+
+        // Hand state
+        this.handsState = {
+          Left: this.newHandState('Left'),
+          Right: this.newHandState('Right'),
+        };
+        this.PINCH_ON = 0.40;  // ratio threshold (thumb–index vs wrist–index_mcp)
+        this.PINCH_OFF = 0.52;
+        this.smoothAlpha = 0.35;
+
+        // Gesture cooldown
+        this.lastToggleTime = 0;
+        this.toggleCooldown = 800; // ms
+
+        // 3D scene
+        this.initThree();
+
+        // Resize
+        window.addEventListener('resize', () => this.onResize());
+        this.onResize();
+      }
+
+      newHandState(label) {
+        return {
+          label,
+          pinch: false,
+          prevPinch: false,
+          pinchPos: { x: null, y: null },       // canvas space (mirrored)
+          pinchPosRaw: { x: null, y: null },
+          pinchAngle: 0,
+          pinchAngleStart: 0,
+          started: false,
+          worldAtGrab: new THREE.Vector3(),
+          objAtGrab: new THREE.Vector3(),
+          rotAtGrab: new THREE.Euler(),
+          pinchPosAtGrab: { x: 0, y: 0 },
+        };
+      }
+
+      async init() {
+        this.setupCanvas();
+        await this.setupCamera();
+        await this.setupHands();
+
+        this.animate();
+      }
+
+      setupCanvas() {
+        this.skelCanvas.width = this.width;
+        this.skelCanvas.height = this.height;
+        this.skelCtx.lineCap = 'round';
+        this.skelCtx.lineJoin = 'round';
+      }
+
+      async setupCamera() {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 1280, height: 720, facingMode: 'user' }
+          });
+          this.video.srcObject = stream;
+        } catch (err) {
+          console.error('Camera error:', err);
+          this.hud.indicator.textContent = 'Camera access denied';
+        }
+      }
+
+      async setupHands() {
+        this.hands = new Hands({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+        this.hands.setOptions({
+          maxNumHands: 2,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.6,
+          minTrackingConfidence: 0.6
+        });
+        this.hands.onResults((r) => this.onResults(r));
+
+        this.camera = new Camera(this.video, {
+          onFrame: async () => { await this.hands.send({ image: this.video }); },
+          width: 1280, height: 720
+        });
+        this.camera.start();
+      }
+
+      // 3D Setup
+      initThree() {
+        this.scene = new THREE.Scene();
+
+        this.camera3D = new THREE.PerspectiveCamera(45, this.width / this.height, 0.1, 100);
+        this.camera3D.position.set(0, 0, 5);
+
+        this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1.5));
+        this.renderer.setSize(this.width, this.height);
+        this.renderer.domElement.classList.add('webgl');
+        document.querySelector('.container').appendChild(this.renderer.domElement);
+
+        const ambient = new THREE.AmbientLight(0x7fffff, 0.35);
+        this.scene.add(ambient);
+        const point = new THREE.PointLight(0x00eaff, 1.0, 0, 2);
+        point.position.set(2.5, 2.5, 3);
+        this.scene.add(point);
+
+        // Grid (neon)
+        const grid = new THREE.GridHelper(20, 20, 0x00eaff, 0x004c7a);
+        grid.material.opacity = 0.15;
+        grid.material.transparent = true;
+        grid.position.y = -2.5;
+        this.scene.add(grid);
+
+        // Cube group
+        this.cubeGroup = new THREE.Group();
+        this.scene.add(this.cubeGroup);
+
+        // Cube mesh
+        const geom = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+        const meshMat = new THREE.MeshStandardMaterial({
+          color: 0x033a4a,
+          emissive: 0x0094ff,
+          emissiveIntensity: 0.25,
+          roughness: 0.4,
+          metalness: 0.2
+        });
+        this.cube = new THREE.Mesh(geom, meshMat);
+        this.cubeGroup.add(this.cube);
+
+        // Neon wireframe
+        const wf = new THREE.WireframeGeometry(geom);
+        const wfMat = new THREE.LineBasicMaterial({ color: 0x00f3ff, transparent: true, opacity: 0.95 });
+        this.cubeWire = new THREE.LineSegments(wf, wfMat);
+        this.cubeGroup.add(this.cubeWire);
+
+        // Fake glow shell (scaled, additive)
+        const glow = new THREE.WireframeGeometry(geom);
+        const glowMat = new THREE.LineBasicMaterial({ color: 0x31ffa5, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending });
+        this.cubeGlow = new THREE.LineSegments(glow, glowMat);
+        this.cubeGlow.scale.set(1.02, 1.02, 1.02);
+        this.cubeGroup.add(this.cubeGlow);
+
+        this.cubeGroup.position.set(0, 0, 0);
+        this.baseScale = 1.0;
+        this.scaleTarget = 1.0;
+
+        // Idle rotation
+        this.idle = { t: 0, speed: 0.004, active: true };
+      }
+
+      onResize() {
+        this.width = window.innerWidth;
+        this.height = window.innerHeight;
+
+        this.setupCanvas();
+
+        this.camera3D.aspect = this.width / this.height;
+        this.camera3D.updateProjectionMatrix();
+        this.renderer.setSize(this.width, this.height);
+      }
+
+      // MediaPipe results handler
+      onResults(results) {
+        this.skelCtx.clearRect(0, 0, this.width, this.height);
+
+        const hands = results.multiHandLandmarks || [];
+        const handedness = results.multiHandedness || []; // matches order
+
+        // Reset pinch flags (will set per detected hand)
+        this.handsState.Left.prevPinch = this.handsState.Left.pinch;
+        this.handsState.Right.prevPinch = this.handsState.Right.pinch;
+        this.handsState.Left.pinch = false;
+        this.handsState.Right.pinch = false;
+
+        for (let i = 0; i < hands.length; i++) {
+          const lm = hands[i];
+          const label = handedness[i]?.label || (i === 0 ? 'Right' : 'Left');
+          const hand = this.handsState[label];
+
+          // Draw skeleton (optional)
+          if (this.showSkeleton) this.drawHand(lm);
+
+          // Pinch detection
+          const pinch = this.getPinchInfo(lm);
+
+          // Smooth pinch position
+          const px = (1 - pinch.center.x) * this.width;   // mirrored canvas x
+          const py = pinch.center.y * this.height;
+          hand.pinchPosRaw.x = px; hand.pinchPosRaw.y = py;
+          if (hand.pinchPos.x == null) { hand.pinchPos.x = px; hand.pinchPos.y = py; }
+          hand.pinchPos.x = this.lerp(hand.pinchPos.x, px, this.smoothAlpha);
+          hand.pinchPos.y = this.lerp(hand.pinchPos.y, py, this.smoothAlpha);
+
+          // Hysteresis
+          const ratio = pinch.ratio;
+          if (hand.prevPinch) {
+            hand.pinch = ratio < this.PINCH_OFF;
+          } else {
+            hand.pinch = ratio < this.PINCH_ON;
+          }
+          hand.pinchAngle = pinch.angle;
+
+          // Visual pinch marker
+          this.drawPinchCursor(hand.pinchPos.x, hand.pinchPos.y, hand.pinch, label);
+        }
+
+        // HUD updates
+        this.hud.leftPinch.textContent = `Left: ${this.handsState.Left.pinch ? 'Pinching' : '—'}`;
+        this.hud.rightPinch.textContent = `Right: ${this.handsState.Right.pinch ? 'Pinching' : '—'}`;
+
+        // Mode toggle via peace sign
+        let anyGesture = 'none';
+        if (hands.length) {
+          anyGesture = this.detectGesture(hands[0]);
+          if (anyGesture === 'peace') {
+            const now = Date.now();
+            if (now - this.lastToggleTime > this.toggleCooldown) {
+              this.mode = this.mode === 'move' ? 'rotate' : 'move';
+              this.hud.modePill.textContent = this.mode === 'move' ? 'Move' : 'Rotate';
+              this.lastToggleTime = now;
+            }
+          }
+        }
+
+        this.interactions();
+      }
+
+      // Interaction logic
+      interactions() {
+        const L = this.handsState.Left;
+        const R = this.handsState.Right;
+        const onePinch = (L.pinch ? 'Left' : '') || (R.pinch ? 'Right' : '');
+        const twoPinches = L.pinch && R.pinch;
+
+        // Two-hand pinch: SCALE
+        if (twoPinches) {
+          this.idle.active = false;
+
+          // Initialize two-hand grab if not started
+          if (!L.started || !R.started) {
+            this.startTwoHandScale();
+            L.started = true; R.started = true;
+          }
+          this.updateTwoHandScale();
+
+          this.hud.indicator.textContent = '👐 Two-hand pinch: scaling cube';
+          return; // two-hand overrides single
+        }
+
+        // Single-hand interactions
+        const activeHand = this.handsState[onePinch] || null;
+        const inactiveOther = (onePinch === 'Left') ? R : (onePinch === 'Right' ? L : null);
+
+        if (activeHand && activeHand.pinch) {
+          this.idle.active = false;
+
+          if (!activeHand.started) {
+            this.startSingleHand(activeHand);
+            activeHand.started = true;
+          }
+
+          if (this.mode === 'move') {
+            this.updateSingleHandMove(activeHand);
+            this.hud.indicator.textContent = '👉 Pinch + drag to move • Twist to rotate Z';
+          } else {
+            this.updateSingleHandRotate(activeHand);
+            this.hud.indicator.textContent = '🌀 Rotate mode: pinch + drag to orbit • Twist for Z-rotation';
+          }
+        } else {
+          // End interactions when pinch released
+          if (L.started && !L.pinch) L.started = false;
+          if (R.started && !R.pinch) R.started = false;
+
+          // Idle rotation resumes
+          this.idle.active = true;
+          this.hud.indicator.textContent = '👋 Pinch to grab. ✌️ to toggle rotate mode. Pinch both hands to scale.';
+        }
+      }
+
+      // Project canvas coords to world point on plane z = object.z
+      canvasToWorldOnZ(xCanvasMirrored, yCanvas, zWorld) {
+        // Unmirror for raycasting (3D canvas is not mirrored)
+        const xCanvas = this.width - xCanvasMirrored;
+        const xNdc = (xCanvas / this.width) * 2 - 1;
+        const yNdc = -(yCanvas / this.height) * 2 + 1;
+
+        const ray = new THREE.Raycaster();
+        ray.setFromCamera({ x: xNdc, y: yNdc }, this.camera3D);
+
+        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -zWorld);
+        const pt = new THREE.Vector3();
+        ray.ray.intersectPlane(plane, pt);
+        return pt;
+      }
+
+      // Single hand: start grab
+      startSingleHand(hand) {
+        // Move/Rotate share this
+        const z = this.cubeGroup.position.z;
+        const world = this.canvasToWorldOnZ(hand.pinchPos.x, hand.pinchPos.y, z);
+        hand.worldAtGrab.copy(world);
+        hand.objAtGrab.copy(this.cubeGroup.position);
+        hand.rotAtGrab.copy(this.cubeGroup.rotation);
+        hand.pinchPosAtGrab.x = hand.pinchPos.x;
+        hand.pinchPosAtGrab.y = hand.pinchPos.y;
+        hand.pinchAngleStart = hand.pinchAngle;
+      }
+
+      // Move
+      updateSingleHandMove(hand) {
+        const z = this.cubeGroup.position.z;
+        const worldNow = this.canvasToWorldOnZ(hand.pinchPos.x, hand.pinchPos.y, z);
+        const delta = new THREE.Vector3().copy(worldNow).sub(hand.worldAtGrab);
+        const target = new THREE.Vector3().copy(hand.objAtGrab).add(delta);
+
+        // Smooth target
+        this.cubeGroup.position.lerp(target, 0.35);
+
+        // Twist rotation around Z
+        const dAngle = hand.pinchAngle - hand.pinchAngleStart;
+        const rotZTarget = hand.rotAtGrab.z + dAngle * 1.0; // gain
+        this.cubeGroup.rotation.z = this.lerpAngle(this.cubeGroup.rotation.z, rotZTarget, 0.35);
+      }
+
+      // Rotate mode: pinch + drag to orbit
+      updateSingleHandRotate(hand) {
+        const dx = (hand.pinchPos.x - hand.pinchPosAtGrab.x) / this.width;
+        const dy = (hand.pinchPos.y - hand.pinchPosAtGrab.y) / this.height;
+        const ROT_GAIN = Math.PI * 1.5; // ~270° for full screen drag
+
+        const rx = hand.rotAtGrab.x + (-dy * ROT_GAIN);
+        const ry = hand.rotAtGrab.y + (dx * ROT_GAIN);
+
+        // Twist Z
+        const dAngle = hand.pinchAngle - hand.pinchAngleStart;
+        const rz = hand.rotAtGrab.z + dAngle * 1.0;
+
+        // Smooth
+        this.cubeGroup.rotation.x = this.lerpAngle(this.cubeGroup.rotation.x, rx, 0.35);
+        this.cubeGroup.rotation.y = this.lerpAngle(this.cubeGroup.rotation.y, ry, 0.35);
+        this.cubeGroup.rotation.z = this.lerpAngle(this.cubeGroup.rotation.z, rz, 0.35);
+      }
+
+      // Two-hand: start scaling
+      startTwoHandScale() {
+        const L = this.handsState.Left, R = this.handsState.Right;
+
+        // Set grab bases
+        [L, R].forEach(h => {
+          h.objAtGrab.copy(this.cubeGroup.position);
+          h.rotAtGrab.copy(this.cubeGroup.rotation);
+          h.pinchPosAtGrab.x = h.pinchPos.x;
+          h.pinchPosAtGrab.y = h.pinchPos.y;
+          h.pinchAngleStart = h.pinchAngle;
+        });
+
+        this.scaleBase = this.cubeGroup.scale.x || 1.0;
+        this.distAtGrab = this.dist2D(L.pinchPos, R.pinchPos);
+      }
+
+      updateTwoHandScale() {
+        const L = this.handsState.Left, R = this.handsState.Right;
+
+        const distNow = this.dist2D(L.pinchPos, R.pinchPos);
+        let s = this.scaleBase * (distNow / Math.max(40, this.distAtGrab));
+        s = Math.min(4.0, Math.max(0.4, s));
+        this.scaleTarget = s;
+        this.cubeGroup.scale.lerp(new THREE.Vector3(s, s, s), 0.35);
+        this.hud.scalePill.textContent = `Scale: ${s.toFixed(2)}x`;
+
+        // Optional: keep cube centered between hands
+        const midX = (L.pinchPos.x + R.pinchPos.x) / 2;
+        const midY = (L.pinchPos.y + R.pinchPos.y) / 2;
+        const worldMid = this.canvasToWorldOnZ(midX, midY, this.cubeGroup.position.z);
+        this.cubeGroup.position.lerp(worldMid, 0.25);
+      }
+
+      // Drawing helpers
+      drawHand(landmarks) {
+        // Connections list
+        const CONNS = [
+          [0,1],[1,2],[2,3],[3,4],
+          [0,5],[5,6],[6,7],[7,8],
+          [0,9],[9,10],[10,11],[11,12],
+          [0,13],[13,14],[14,15],[15,16],
+          [0,17],[17,18],[18,19],[19,20]
+        ];
+        this.skelCtx.strokeStyle = 'rgba(0,255,255,0.8)';
+        this.skelCtx.lineWidth = 2;
+        for (const [a, b] of CONNS) {
+          const pa = landmarks[a], pb = landmarks[b];
+          const ax = (1 - pa.x) * this.width, ay = pa.y * this.height;
+          const bx = (1 - pb.x) * this.width, by = pb.y * this.height;
+          this.skelCtx.beginPath();
+          this.skelCtx.moveTo(ax, ay);
+          this.skelCtx.lineTo(bx, by);
+          this.skelCtx.stroke();
+        }
+        for (let i = 0; i < landmarks.length; i++) {
+          const p = landmarks[i];
+          const x = (1 - p.x) * this.width, y = p.y * this.height;
+          this.skelCtx.beginPath();
+          this.skelCtx.arc(x, y, i === 8 || i === 4 ? 5 : 3, 0, Math.PI*2);
+          this.skelCtx.fillStyle = i === 8 || i === 4 ? 'rgba(0,255,255,0.95)' : 'rgba(0,255,255,0.6)';
+          this.skelCtx.fill();
+        }
+      }
+
+      drawPinchCursor(x, y, active, label) {
+        const ctx = this.skelCtx;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, y, active ? 16 : 10, 0, Math.PI*2);
+        ctx.strokeStyle = active ? 'rgba(49,255,165,0.95)' : 'rgba(0,255,255,0.6)';
+        ctx.lineWidth = active ? 3 : 2;
+        ctx.stroke();
+        // label
+        ctx.fillStyle = 'rgba(0,255,255,0.85)';
+        ctx.font = '12px Segoe UI, Roboto, Arial';
+        ctx.fillText(label, x + 12, y - 12);
+        ctx.restore();
+      }
+
+      // Gesture utils
+      getPinchInfo(lm) {
+        const thumbTip = lm[4], indexTip = lm[8], wrist = lm[0], indexMcp = lm[5];
+        const tipDist = this.distN(thumbTip, indexTip);
+        const refDist = this.distN(wrist, indexMcp) + 1e-6;
+        const ratio = tipDist / refDist;
+
+        const center = { x: (thumbTip.x + indexTip.x) / 2, y: (thumbTip.y + indexTip.y) / 2 };
+        const angle = Math.atan2(indexTip.y - thumbTip.y, indexTip.x - thumbTip.x);
+
+        return { ratio, center, angle };
+      }
+
+      detectGesture(landmarks) {
+        const idxTip = landmarks[8], idxPip = landmarks[6];
+        const midTip = landmarks[12], midPip = landmarks[10];
+        const ringTip = landmarks[16], ringPip = landmarks[14];
+        const pinkTip = landmarks[20], pinkPip = landmarks[18];
+        const thumbTip = landmarks[4], thumbIp = landmarks[3];
+
+        const idxExt   = idxTip.y < idxPip.y;
+        const midExt   = midTip.y < midPip.y;
+        const ringExt  = ringTip.y < ringPip.y;
+        const pinkExt  = pinkTip.y < pinkPip.y;
+        const thumbExt = Math.abs(thumbTip.x - thumbIp.x) > 0.02;
+
+        if (idxExt && midExt && !ringExt && !pinkExt) return 'peace';
+        if (idxExt && !midExt && !ringExt && !pinkExt) return 'point';
+        if (thumbExt && !idxExt && !midExt) return 'thumbsUp';
+        if (idxExt && midExt && ringExt && pinkExt && thumbExt) return 'openPalm';
+        return 'none';
+      }
+
+      // Math helpers
+      distN(a, b) { const dx = a.x - b.x, dy = a.y - b.y; return Math.hypot(dx, dy); }
+      dist2D(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+      lerp(a, b, t) { return a + (b - a) * t; }
+      lerpAngle(a, b, t) {
+        let diff = (b - a + Math.PI) % (Math.PI * 2) - Math.PI;
+        return a + diff * t;
+      }
+
+      // Render loop
+      animate() {
+        requestAnimationFrame(() => this.animate());
+
+        // Idle rotation
+        if (this.idle.active) {
+          this.idle.t += this.idle.speed;
+          this.cubeGroup.rotation.y += 0.0035;
+          this.cubeGroup.rotation.x = Math.sin(this.idle.t) * 0.15;
+        }
+
+        this.renderer.render(this.scene, this.camera3D);
+      }
+    }
+
+    // Boot
+    window.addEventListener('load', () => { new IronHolo(); });
+  </script>
+</body>
+</html>
